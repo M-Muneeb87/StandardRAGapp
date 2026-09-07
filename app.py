@@ -9,6 +9,8 @@ from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
 
+# ... (keep the rest of your UI and app logic below this exactly the same) ...
+
 # Load environment variables
 load_dotenv()
 
