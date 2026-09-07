@@ -5,27 +5,20 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
-from langchain.chains.question_answering import load_qa_chain
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
-
-# ... (keep the rest of your UI and app logic below this exactly the same) ...
 
 # Load environment variables
 load_dotenv()
 
-# --- 1. Beautiful UI Configuration ---
+# --- Page Configuration ---
 st.set_page_config(page_title="RAG PDF Assistant", page_icon="📚", layout="wide")
 
 st.markdown("""
 <style>
-    /* Main background */
     .stApp { background-color: #f4f7f6; }
-    
-    /* Headers */
     h1, h2, h3 { color: #1e3a8a; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-    
-    /* Text input styling */
     .stTextInput input { 
         border: 2px solid #cbd5e1; 
         border-radius: 8px; 
@@ -33,8 +26,6 @@ st.markdown("""
         font-size: 16px;
     }
     .stTextInput input:focus { border-color: #1e3a8a; }
-    
-    /* Button styling */
     .stButton button { 
         background-color: #1e3a8a; 
         color: white; 
@@ -44,15 +35,12 @@ st.markdown("""
         transition: all 0.3s ease;
     }
     .stButton button:hover { background-color: #152c6b; border-color: #152c6b; color: white;}
-    
-    /* Sidebar */
     [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e2e8f0; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. PDF Processing Functions ---
+# --- PDF Processing Functions ---
 def get_pdf_text(pdf_docs):
-    """Extracts text from large PDFs efficiently."""
     text = ""
     for pdf in pdf_docs:
         pdf_reader = PdfReader(pdf)
@@ -63,18 +51,14 @@ def get_pdf_text(pdf_docs):
     return text
 
 def get_text_chunks(text):
-    """Splits large text into manageable chunks for the LLM."""
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     return text_splitter.split_text(text)
 
 def get_vector_store(text_chunks):
-    """Generates embeddings using open-source models and stores them in FAISS."""
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    return vector_store
+    return FAISS.from_texts(text_chunks, embedding=embeddings)
 
-def get_conversational_chain():
-    """Configures the Langchain QA chain with the Groq model."""
+def get_rag_chain():
     prompt_template = """
     Answer the question as detailed as possible based ONLY on the provided context. 
     If the answer is not contained in the context, explicitly state: "The answer is not available in the uploaded document." 
@@ -89,28 +73,28 @@ def get_conversational_chain():
     Answer:
     """
     
-    # Retrieve the API key securely
     api_key = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
     if not api_key:
-        st.error("⚠️ Missing GROQ_API_KEY. Please set it in your .env file or Streamlit Cloud Secrets.")
+        st.error("⚠️ Missing GROQ_API_KEY. Please set it in Streamlit Cloud Secrets or your .env file.")
         st.stop()
 
-    # Using the model specified in your screenshots
     model = ChatGroq(
         api_key=api_key,
         model_name="openai/gpt-oss-120b",
         temperature=0.3
     )
 
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    return load_qa_chain(model, chain_type="stuff", prompt=prompt)
+    prompt = ChatPromptTemplate.from_template(prompt_template)
+    output_parser = StrOutputParser()
+    
+    # Modern LCEL chain
+    return prompt | model | output_parser
 
-# --- 3. Main Application Logic ---
+# --- Main App ---
 def main():
     st.title("📚 Chat with your Large PDFs")
-    st.write("Upload your documents securely and use AI to extract insights instantly.")
+    st.write("Upload your documents and query them using Groq-accelerated inference.")
 
-    # Use session state to cache the vector store (Crucial for large PDFs)
     if "vector_store" not in st.session_state:
         st.session_state.vector_store = None
 
@@ -124,38 +108,33 @@ def main():
             if not pdf_docs:
                 st.warning("⚠️ Please upload at least one PDF.")
             else:
-                with st.spinner("Extracting text and generating embeddings... This may take a minute for large files."):
+                with st.spinner("Extracting text and building vector store..."):
                     raw_text = get_pdf_text(pdf_docs)
                     if raw_text.strip():
                         text_chunks = get_text_chunks(raw_text)
-                        # Store in session state so it doesn't reload on every chat message
                         st.session_state.vector_store = get_vector_store(text_chunks)
-                        st.success("✅ Documents processed successfully! You can now ask questions.")
+                        st.success("✅ Documents processed successfully!")
                     else:
-                        st.error("❌ Could not read text from the PDFs. They might be scanned images.")
+                        st.error("❌ Could not extract text. Check if the PDF consists of scanned images.")
 
     st.markdown("---")
     
-    # Chat Interface
-    user_question = st.text_input("Ask a question about your uploaded documents:", placeholder="e.g., What is the main conclusion of the report?")
+    user_question = st.text_input("Ask a question about your uploaded documents:", placeholder="e.g., What is the summary of this document?")
 
     if user_question:
         if st.session_state.vector_store is None:
-            st.error("⚠️ Please upload and process a PDF using the sidebar first.")
+            st.error("⚠️ Please upload and process a PDF in the sidebar first.")
         else:
-            with st.spinner("Scanning documents and generating response..."):
-                # Search the vector database for relevant chunks
-                docs = st.session_state.vector_store.similarity_search(user_question)
-                chain = get_conversational_chain()
+            with st.spinner("Retrieving context and generating response..."):
+                # Retrieve matching chunks
+                docs = st.session_state.vector_store.similarity_search(user_question, k=4)
+                context = "\n\n".join([doc.page_content for doc in docs])
                 
-                # Get the answer
-                response = chain.invoke(
-                    {"input_documents": docs, "question": user_question},
-                    return_only_outputs=True
-                )
+                chain = get_rag_chain()
+                response = chain.invoke({"context": context, "question": user_question})
                 
                 st.markdown("### 💡 AI Response:")
-                st.info(response["output_text"])
+                st.info(response)
 
 if __name__ == "__main__":
     main()
